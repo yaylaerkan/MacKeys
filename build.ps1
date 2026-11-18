@@ -8,7 +8,7 @@ if (-not (Test-Path $csc)) { throw 'C# compiler not found. .NET Framework 4.x is
 
 $bin = Join-Path $root 'bin'
 New-Item -ItemType Directory -Force $bin | Out-Null
-& $csc /nologo /target:winexe /optimize+ /out:"$bin\MacKeys.exe" `
+& $csc /nologo /target:winexe /optimize+ /out:"$bin\MacKeys.exe" /win32icon:"$root\assets\MacKeys.ico" `
     /reference:System.dll /reference:System.Drawing.dll /reference:System.Management.dll /reference:System.Windows.Forms.dll `
     "$root\src\MacKeys.cs"
 if ($LASTEXITCODE -ne 0) { throw "Build failed (csc exit code $LASTEXITCODE)." }

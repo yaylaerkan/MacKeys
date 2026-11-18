@@ -40,6 +40,7 @@ $sc = $shell.CreateShortcut($lnk)
 $sc.TargetPath = $exe
 $sc.WorkingDirectory = $installDir
 $sc.Description = 'Mac-style keys for Apple Magic Keyboard'
+$sc.IconLocation = "$exe,0"
 $sc.Save()
 
 if ($SkipPowerToys) { Start-Process $exe; Write-Host 'Done (PowerToys skipped).'; return }
