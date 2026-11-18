@@ -602,7 +602,11 @@ namespace MacKeys
                 { Verb = "runas", UseShellExecute = true };
                 using (var p = Process.Start(psi)) { p.WaitForExit(); exit = p.ExitCode; }
             }
-            catch (System.ComponentModel.Win32Exception) { return "Administrator permission was not given, so nothing was changed."; }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                if (ex.NativeErrorCode == 1223) return "Administrator permission was not given, so nothing was changed.";
+                return "Windows could not show the administrator prompt (error " + ex.NativeErrorCode + ": " + ex.Message + ").";
+            }
             catch (Exception ex) { return "Could not ask for administrator permission: " + ex.Message; }
             if (exit != 0) return "The administrator step failed (code " + exit + "). Details: " + GrantLog;
             return CanWrite() ? null : "The setting is still not writable after the administrator step.";
