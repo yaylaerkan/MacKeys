@@ -43,7 +43,7 @@ $sc.Description = 'Mac-style keys for Apple Magic Keyboard'
 $sc.IconLocation = "$exe,0"
 $sc.Save()
 
-if ($SkipPowerToys) { Start-Process $exe; Write-Host 'Done (PowerToys skipped).'; return }
+if ($SkipPowerToys) { Start-Process $exe -WorkingDirectory $installDir; Write-Host 'Done (PowerToys skipped).'; return }
 
 # ---------------- PowerToys Keyboard Manager ----------------
 $ptExe = @(
@@ -54,7 +54,7 @@ $ptExe = @(
 if (-not $ptExe) {
     Write-Warning 'PowerToys is not installed. Install it, then run this script again:'
     Write-Host '    winget install Microsoft.PowerToys'
-    Start-Process $exe
+    Start-Process $exe -WorkingDirectory $installDir
     return
 }
 
@@ -92,8 +92,8 @@ if (Test-Path $settings) {
     Write-Warning 'PowerToys settings not found (has PowerToys been started once?). Enable Keyboard Manager manually in PowerToys.'
 }
 
-Start-Process $ptExe
+Start-Process $ptExe -WorkingDirectory (Split-Path $ptExe)
 Start-Sleep -Seconds 3
-Start-Process $exe
+Start-Process $exe -WorkingDirectory $installDir
 Write-Host ''
 Write-Host 'Done! MacKeys is running (look for the sun icon in the tray) and PowerToys has the Mac-style shortcuts.'
