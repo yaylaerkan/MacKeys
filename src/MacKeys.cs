@@ -577,36 +577,62 @@ namespace MacKeys
         const string Key = @"Software\Microsoft\Windows\CurrentVersion\Policies\System";
         const string Name = "DisableLockWorkstation";
 
+        const System.Security.AccessControl.RegistryRights Needed =
+            System.Security.AccessControl.RegistryRights.ReadKey | System.Security.AccessControl.RegistryRights.SetValue;
+
+        // Open with exactly the rights MacKeys is granted (OpenSubKey(name, true) would ask for full KEY_WRITE and fail).
+        static RegistryKey OpenForWrite()
+        {
+            return Registry.CurrentUser.OpenSubKey(Key, RegistryKeyPermissionCheck.ReadWriteSubTree, Needed);
+        }
+
         public static bool CanWrite()
         {
-            try { using (var k = Registry.CurrentUser.OpenSubKey(Key, true)) return k != null; } catch { return false; }
+            try { using (var k = OpenForWrite()) return k != null; } catch { return false; }
         }
 
         // One-time, elevated: create the key and let the current user change values in it.
-        public static bool GrantAccess()
+        // Returns null on success, otherwise a message for the user.
+        public static string GrantAccess()
         {
+            int exit;
             try
             {
                 var psi = new ProcessStartInfo(Application.ExecutablePath, "--grant " + System.Security.Principal.WindowsIdentity.GetCurrent().User.Value)
                 { Verb = "runas", UseShellExecute = true };
-                using (var p = Process.Start(psi)) p.WaitForExit();
-                return CanWrite();
+                using (var p = Process.Start(psi)) { p.WaitForExit(); exit = p.ExitCode; }
             }
-            catch { return false; } // UAC cancelled
+            catch (System.ComponentModel.Win32Exception) { return "Administrator permission was not given, so nothing was changed."; }
+            catch (Exception ex) { return "Could not ask for administrator permission: " + ex.Message; }
+            if (exit != 0) return "The administrator step failed (code " + exit + "). Details: " + GrantLog;
+            return CanWrite() ? null : "The setting is still not writable after the administrator step.";
         }
 
-        // Runs in the elevated "--grant <sid>" instance.
-        public static void DoGrant(string sid)
+        static string GrantLog { get { return Path.Combine(Path.GetTempPath(), "MacKeys-grant.log"); } }
+
+        // Runs in the elevated "--grant <sid>" instance. Exit code 0 = success.
+        public static int DoGrant(string sid)
         {
-            using (var users = Registry.Users.OpenSubKey(sid, true))
-            using (var k = users.CreateSubKey(Key))
+            try
             {
-                var sec = k.GetAccessControl();
-                sec.AddAccessRule(new System.Security.AccessControl.RegistryAccessRule(
-                    new System.Security.Principal.SecurityIdentifier(sid),
-                    System.Security.AccessControl.RegistryRights.QueryValues | System.Security.AccessControl.RegistryRights.SetValue,
-                    System.Security.AccessControl.AccessControlType.Allow));
-                k.SetAccessControl(sec);
+                using (var users = Registry.Users.OpenSubKey(sid, true))
+                {
+                    if (users == null) throw new InvalidOperationException("User hive " + sid + " is not loaded.");
+                    using (var k = users.CreateSubKey(Key))
+                    {
+                        var sec = k.GetAccessControl();
+                        sec.AddAccessRule(new System.Security.AccessControl.RegistryAccessRule(
+                            new System.Security.Principal.SecurityIdentifier(sid), Needed,
+                            System.Security.AccessControl.AccessControlType.Allow));
+                        k.SetAccessControl(sec);
+                    }
+                }
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                try { File.WriteAllText(GrantLog, DateTime.Now + "  " + ex); } catch { }
+                return 1;
             }
         }
 
@@ -619,7 +645,7 @@ namespace MacKeys
         {
             try
             {
-                using (var k = Registry.CurrentUser.OpenSubKey(Key, true))
+                using (var k = OpenForWrite())
                 {
                     if (k == null) return;
                     if (disabled) k.SetValue(Name, 1, RegistryValueKind.DWord); else k.DeleteValue(Name, false);
@@ -756,10 +782,18 @@ namespace MacKeys
                     "To let ⌘L reach apps, MacKeys turns off Win+L while Mac keys are active (⌃⌘Q still locks) and turns it back on otherwise.\n\n" +
                     "Windows will ask for administrator permission once so MacKeys can change this setting. Continue?",
                     "MacKeys", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
-                if (r != DialogResult.OK || !LockPolicy.GrantAccess()) return;
+                if (r != DialogResult.OK) return;
+                var err = LockPolicy.GrantAccess();
+                if (err != null) { MessageBox.Show(err, "MacKeys", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
             }
             Settings.AllowCmdL = !Settings.AllowCmdL;
             ctl.Apply(false);
+            string msg = !Settings.AllowCmdL ? "⌘L locks the screen again (Win+L is back on)."
+                       : ctl.Active ? "⌘L now goes to apps. Use ⌃⌘Q to lock the screen."
+                       : "⌘L will go to apps whenever Mac keys are active.";
+            if (Settings.AllowCmdL && ctl.Active && !LockPolicy.IsDisabled())
+                msg = "Could not turn off Win+L. Please report this on GitHub.";
+            icon.ShowBalloonTip(3000, "MacKeys", msg, ToolTipIcon.None);
         }
 
         static bool IsAutostart()
@@ -814,7 +848,7 @@ namespace MacKeys
         static void Main(string[] args)
         {
             if (args.Length > 0 && args[0] == "--lock") { LockPolicy.LockNow(); return; }
-            if (args.Length > 1 && args[0] == "--grant") { try { LockPolicy.DoGrant(args[1]); } catch { } return; }
+            if (args.Length > 1 && args[0] == "--grant") { Environment.Exit(LockPolicy.DoGrant(args[1])); return; }
 
             bool created;
             using (new Mutex(true, "MacKeys.Resident", out created))
