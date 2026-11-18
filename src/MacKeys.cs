@@ -48,6 +48,30 @@ namespace MacKeys
         [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
         [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
         [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO lii);
+
+        // SendInput
+        [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo; }
+        [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+        [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public KEYBDINPUT ki; [FieldOffset(0)] public MOUSEINPUT mi; }
+        [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public INPUTUNION u; }
+        [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+
+        // Raw input
+        [StructLayout(LayoutKind.Sequential)] public struct RAWINPUTDEVICE { public ushort usUsagePage, usUsage; public uint dwFlags; public IntPtr hwndTarget; }
+        [StructLayout(LayoutKind.Sequential)] public struct RAWINPUTHEADER { public uint dwType, dwSize; public IntPtr hDevice, wParam; }
+        [StructLayout(LayoutKind.Sequential)] public struct RAWKEYBOARD { public ushort MakeCode, Flags, Reserved, VKey; public uint Message, ExtraInformation; }
+        [DllImport("user32.dll")] public static extern bool RegisterRawInputDevices(RAWINPUTDEVICE[] devices, uint count, uint size);
+        [DllImport("user32.dll")] public static extern uint GetRawInputData(IntPtr hRawInput, uint command, IntPtr data, ref uint size, uint headerSize);
+
+        // Low-level keyboard hook
+        [StructLayout(LayoutKind.Sequential)] public struct KBDLLHOOKSTRUCT { public uint vkCode, scanCode, flags, time; public IntPtr dwExtraInfo; }
+        public delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")] public static extern IntPtr SetWindowsHookEx(int idHook, HookProc fn, IntPtr hMod, uint threadId);
+        [DllImport("user32.dll")] public static extern bool UnhookWindowsHookEx(IntPtr hook);
+        [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hook, int nCode, IntPtr wParam, IntPtr lParam);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandle(string name);
+        [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr OpenEvent(uint access, bool inherit, string name);
         [DllImport("kernel32.dll")] public static extern bool SetEvent(IntPtr h);
         [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
@@ -241,9 +265,11 @@ namespace MacKeys
         }
 
         public event EventHandler DevicesChanged;
+        public KeyWatch Keys; // set by Program; receives WM_INPUT
 
         protected override void WndProc(ref Message m)
         {
+            if (m.Msg == 0x00FF /*WM_INPUT*/ && Keys != null) { Keys.OnRawInput(m.LParam); base.WndProc(ref m); return; }
             if (m.Msg == 0x0312 /*WM_HOTKEY*/) { OnKey(m.WParam.ToInt32() == 1 ? -STEP : STEP); return; }
             if (m.Msg == 0x0219 /*WM_DEVICECHANGE*/ && DevicesChanged != null) DevicesChanged(this, EventArgs.Empty);
             base.WndProc(ref m);
@@ -539,32 +565,7 @@ namespace MacKeys
             IntPtr h = Native.OpenEvent(0x0002 /*EVENT_MODIFY_STATE*/, false, "PowerToys_KeyboardManager_Event_Settings");
             if (h == IntPtr.Zero) return;
             Native.SetEvent(h); Native.CloseHandle(h);
-            // If the switch happens while a remapped modifier is held (e.g. Control -> Win), its key-up is no longer
-            // translated and Windows keeps the modifier "down": every key would then act as Win+key. Release any
-            // modifier that is still down once the new config is loaded, but only once the user has let go.
-            ThreadPool.QueueUserWorkItem(_ => ReleaseStuckModifiers());
-        }
-
-        static readonly byte[] Modifiers = { 0x5B, 0x5C, 0xA2, 0xA3, 0xA4, 0xA5, 0xA0, 0xA1 }; // L/R Win, Ctrl, Alt, Shift
-
-        public static void ReleaseStuckModifiers()
-        {
-            for (int attempt = 0; attempt < 20; attempt++)   // check for ~10 s
-            {
-                Thread.Sleep(500);
-                foreach (var vk in Modifiers)
-                    if ((Native.GetAsyncKeyState(vk) & 0x8000) != 0 && !PhysicallyHeld())
-                        Native.keybd_event(vk, 0, 2 /*KEYUP*/, UIntPtr.Zero);
-            }
-        }
-
-        // The physical state is unknown to us; a modifier that stays down for a long time with no other key
-        // activity is treated as stuck. GetLastInputInfo tells us when the user last touched any input device.
-        static bool PhysicallyHeld()
-        {
-            var lii = new Native.LASTINPUTINFO(); lii.cbSize = (uint)Marshal.SizeOf(typeof(Native.LASTINPUTINFO));
-            if (!Native.GetLastInputInfo(ref lii)) return false;
-            return unchecked((uint)Environment.TickCount - lii.dwTime) < 1500; // input within the last 1.5 s
+            // Any modifier left "down" by the switch is released by KeyWatch's watchdog.
         }
     }
 
@@ -668,24 +669,193 @@ namespace MacKeys
         }
     }
 
+    // ---------------- Log (next to MacKeys.exe) ----------------
+    static class Log
+    {
+        static readonly object gate = new object();
+        static string PathName { get { return Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "mackeys.log"); } }
+
+        public static void Write(string msg)
+        {
+            try
+            {
+                lock (gate)
+                {
+                    var p = PathName;
+                    var fi = new FileInfo(p);
+                    if (fi.Exists && fi.Length > 256 * 1024) File.Delete(p);
+                    File.AppendAllText(p, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "  " + msg + Environment.NewLine);
+                }
+            }
+            catch { }
+        }
+    }
+
+    // ---------------- Physical keyboard state, stuck-key watchdog, ⌘L ----------------
+    // Raw Input reports what the keyboards physically send, before PowerToys or any hook changes it.
+    // That lets MacKeys tell a genuinely held modifier from one Windows merely *thinks* is down
+    // (its key-up got lost while a remap changed), and release the latter.
+    class KeyWatch
+    {
+        const long OurTag = 1; // dwExtraInfo PowerToys Keyboard Manager treats as "already processed" and ignores
+        static readonly byte[] Modifiers = { 0x5B, 0x5C, 0xA2, 0xA3, 0xA4, 0xA5, 0xA0, 0xA1 };
+        static readonly string[] ModNames = { "LWin", "RWin", "LCtrl", "RCtrl", "LAlt", "RAlt", "LShift", "RShift" };
+        static readonly HashSet<string> Browsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "arc", "zen", "librewolf", "waterfox" };
+
+        readonly Osd osd;
+        readonly HashSet<int> held = new HashSet<int>();     // physically held modifier keys (raw ids)
+        readonly System.Windows.Forms.Timer watchdog = new System.Windows.Forms.Timer();
+        readonly Stopwatch clock = Stopwatch.StartNew();
+        readonly double[] downSince = new double[Modifiers.Length];
+        readonly Native.HookProc hookProc;                     // keep the delegate alive
+        IntPtr hook;
+        bool rawWorks;
+        double lastRaw = -1e9, lastModUp = -1e9;
+        volatile bool winHeld;
+
+        public static volatile bool CmdLEnabled;               // set by Controller (Mac keys active && option on)
+
+        public KeyWatch(Osd osd)
+        {
+            this.osd = osd;
+            osd.Keys = this;
+            var dev = new[] { new Native.RAWINPUTDEVICE { usUsagePage = 1, usUsage = 6, dwFlags = 0x100 /*INPUTSINK*/, hwndTarget = osd.Handle } };
+            if (!Native.RegisterRawInputDevices(dev, 1, (uint)Marshal.SizeOf(typeof(Native.RAWINPUTDEVICE))))
+                Log.Write("Raw input registration failed; stuck-key watchdog disabled.");
+            watchdog.Interval = 150; watchdog.Tick += (o, e) => Check(); watchdog.Start();
+            hookProc = HookCallback;
+            hook = Native.SetWindowsHookEx(13 /*WH_KEYBOARD_LL*/, hookProc, Native.GetModuleHandle(null), 0);
+            SystemEvents.SessionSwitch += (o, e) => { held.Clear(); winHeld = false; }; // key-ups are not seen on the lock screen
+        }
+
+        double Now { get { return clock.Elapsed.TotalMilliseconds; } }
+
+        /// <summary>True while any modifier is physically held or a key was touched in the last <paramref name="quietMs"/>.</summary>
+        public bool Busy(double quietMs) { return held.Count > 0 || Now - lastRaw < quietMs; }
+
+        public void OnRawInput(IntPtr hRaw)
+        {
+            int hdr = Marshal.SizeOf(typeof(Native.RAWINPUTHEADER));
+            uint size = 0;
+            Native.GetRawInputData(hRaw, 0x10000003 /*RID_INPUT*/, IntPtr.Zero, ref size, (uint)hdr);
+            if (size == 0) return;
+            IntPtr buf = Marshal.AllocHGlobal((int)size);
+            try
+            {
+                if (Native.GetRawInputData(hRaw, 0x10000003, buf, ref size, (uint)hdr) != size) return;
+                var h = (Native.RAWINPUTHEADER)Marshal.PtrToStructure(buf, typeof(Native.RAWINPUTHEADER));
+                if (h.dwType != 1 /*RIM_TYPEKEYBOARD*/ || h.hDevice == IntPtr.Zero) return; // ignore injected input
+                var k = (Native.RAWKEYBOARD)Marshal.PtrToStructure(new IntPtr(buf.ToInt64() + hdr), typeof(Native.RAWKEYBOARD));
+                rawWorks = true;
+                lastRaw = Now;
+                int vk = k.VKey;
+                bool isMod = vk == 0x10 || vk == 0x11 || vk == 0x12 || vk == 0x5B || vk == 0x5C || (vk >= 0xA0 && vk <= 0xA5);
+                if (!isMod) return;
+                int id = (vk << 16) | (k.MakeCode << 1) | ((k.Flags & 2) != 0 ? 1 : 0);
+                if ((k.Flags & 1) != 0) { held.Remove(id); lastModUp = Now; }   // RI_KEY_BREAK
+                else held.Add(id);
+                bool w = false; foreach (var x in held) if ((x >> 16) == 0x5B || (x >> 16) == 0x5C) w = true;
+                winHeld = w;
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+
+        void Check()
+        {
+            double now = Now;
+            if (held.Count > 0 && now - lastRaw > 10000) { Log.Write("No keyboard activity for 10 s while a modifier looked held; resetting."); held.Clear(); winHeld = false; }
+            bool quiet = rawWorks && held.Count == 0 && now - lastModUp > 300 && now - lastRaw > 300;
+            for (int i = 0; i < Modifiers.Length; i++)
+            {
+                bool down = (Native.GetAsyncKeyState(Modifiers[i]) & 0x8000) != 0;
+                if (!down || !quiet) { downSince[i] = 0; continue; }
+                if (downSince[i] == 0) { downSince[i] = now; continue; }
+                if (now - downSince[i] < 300) continue;
+                // Windows thinks it is down, nothing is physically held: release it.
+                if (Modifiers[i] == 0x5B || Modifiers[i] == 0x5C) { Send(0xE8, false); Send(0xE8, true); } // keep Start from opening
+                Send(Modifiers[i], true);
+                downSince[i] = 0;
+                Log.Write("Released stuck " + ModNames[i] + " (foreground: " + ForegroundName() + ")");
+            }
+        }
+
+        // ⌘L: Windows swallows L while the physical Win (⌘) key is down, even with the lock disabled.
+        // In a browser, send F6 instead, which also focuses the address bar.
+        IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && CmdLEnabled && winHeld)
+            {
+                int msg = wParam.ToInt32();
+                if (msg == 0x100 || msg == 0x104)
+                {
+                    var k = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.KBDLLHOOKSTRUCT));
+                    if (k.vkCode == 0x4C && (k.flags & 0x10) == 0 && Browsers.Contains(ForegroundName()))
+                    {
+                        osd.BeginInvoke((Action)FocusAddressBar);
+                        return new IntPtr(1);
+                    }
+                }
+            }
+            return Native.CallNextHookEx(hook, nCode, wParam, lParam);
+        }
+
+        void FocusAddressBar()
+        {
+            bool ctrl = (Native.GetAsyncKeyState(0xA2) & 0x8000) != 0;
+            if (ctrl) Send(0xA2, true);          // ⌘ is Ctrl right now; F6 must arrive without it
+            Send(0x75, false); Send(0x75, true); // F6
+            if (ctrl && winHeld) Send(0xA2, false);
+        }
+
+        static void Send(ushort vk, bool up)
+        {
+            var i = new Native.INPUT { type = 1 };
+            i.u.ki = new Native.KEYBDINPUT { wVk = vk, dwFlags = up ? 2u : 0u, dwExtraInfo = new IntPtr(OurTag) };
+            Native.SendInput(1, new[] { i }, Marshal.SizeOf(typeof(Native.INPUT)));
+        }
+
+        static IntPtr lastFg; static string lastFgName = "";
+        static string ForegroundName()
+        {
+            IntPtr fg = Native.GetForegroundWindow();
+            if (fg == lastFg) return lastFgName;
+            uint pid; Native.GetWindowThreadProcessId(fg, out pid);
+            string name = "";
+            try { using (var p = Process.GetProcessById((int)pid)) name = p.ProcessName; } catch { }
+            lastFg = fg; lastFgName = name;
+            return name;
+        }
+
+        public void Dispose() { if (hook != IntPtr.Zero) Native.UnhookWindowsHookEx(hook); }
+    }
+
     // ---------------- Mac mode controller ----------------
     class Controller
     {
+        const int OffDelayMs = 45000; // Bluetooth keyboards drop the link when they sleep; don't flip for that
+
         readonly Osd osd;
+        readonly KeyWatch keys;
         readonly System.Windows.Forms.Timer poll = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer debounce = new System.Windows.Forms.Timer();
-        bool checking;
+        readonly System.Windows.Forms.Timer offDelay = new System.Windows.Forms.Timer();
+        readonly System.Windows.Forms.Timer retry = new System.Windows.Forms.Timer();
+        bool checking, connectedForMode, ptActive, ptKnown;
         public bool KeyboardConnected { get; private set; }
         public bool Active { get; private set; }
         public event EventHandler Changed;
 
-        public Controller(Osd osd)
+        public Controller(Osd osd, KeyWatch keys)
         {
-            this.osd = osd;
+            this.osd = osd; this.keys = keys;
             debounce.Interval = 1500; debounce.Tick += (o, e) => { debounce.Stop(); Check(); };
             osd.DevicesChanged += (o, e) => { debounce.Stop(); debounce.Start(); };
             poll.Interval = 15000; poll.Tick += (o, e) => Check(); poll.Start();
-            KeyboardConnected = AppleKeyboard.IsConnected();
+            offDelay.Interval = OffDelayMs; offDelay.Tick += (o, e) => { offDelay.Stop(); connectedForMode = false; Log.Write("Apple keyboard gone for 45 s: Mac keys off"); Apply(false); };
+            retry.Interval = 250; retry.Tick += (o, e) => { retry.Stop(); SyncPowerToys(); };
+            KeyboardConnected = connectedForMode = AppleKeyboard.IsConnected();
+            Log.Write("Started. Apple keyboard " + (KeyboardConnected ? "connected" : "not connected") + ", mode " + Settings.Mode);
             Apply(true);
         }
 
@@ -696,20 +866,42 @@ namespace MacKeys
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 bool c = AppleKeyboard.IsConnected();
-                osd.BeginInvoke((Action)(() => { checking = false; if (c != KeyboardConnected) { KeyboardConnected = c; Apply(false); } }));
+                osd.BeginInvoke((Action)(() => { checking = false; OnConnection(c); }));
             });
+        }
+
+        void OnConnection(bool c)
+        {
+            if (c == KeyboardConnected) return;
+            KeyboardConnected = c;
+            Log.Write("Apple keyboard " + (c ? "connected" : "disconnected"));
+            if (c) { offDelay.Stop(); if (!connectedForMode) { connectedForMode = true; Apply(false); } }
+            else offDelay.Start(); // only switch off if it stays away
+            if (Changed != null) Changed(this, EventArgs.Empty);
         }
 
         public void Apply(bool force)
         {
             var m = Settings.Mode;
-            bool active = m == Mode.On || (m == Mode.Auto && KeyboardConnected);
-            bool changed = active != Active;
+            bool active = m == Mode.On || (m == Mode.Auto && connectedForMode);
             Active = active;
+            if (force) ptKnown = false;
             osd.HotkeysEnabled = active;
-            if (changed || force) PowerToysKm.Apply(active);
             LockPolicy.SetDisabled(active && Settings.AllowCmdL);
+            KeyWatch.CmdLEnabled = active && Settings.AllowCmdL;
+            SyncPowerToys();
             if (Changed != null) Changed(this, EventArgs.Empty);
+        }
+
+        // Swap the PowerToys config only while no key is held: changing remaps mid-press loses key-ups
+        // and leaves modifiers stuck.
+        void SyncPowerToys()
+        {
+            if (ptKnown && ptActive == Active) return;
+            if (keys.Busy(400)) { retry.Start(); return; }
+            PowerToysKm.Apply(Active);
+            ptActive = Active; ptKnown = true;
+            Log.Write("PowerToys remaps " + (Active ? "on" : "off"));
         }
 
         public void Shutdown()
@@ -863,9 +1055,11 @@ namespace MacKeys
                 Application.EnableVisualStyles();
                 var osd = new Osd();
                 var h = osd.Handle; // create the window without showing it
-                var ctl = new Controller(osd);
+                var keys = new KeyWatch(osd);
+                var ctl = new Controller(osd, keys);
                 using (new Tray(ctl)) Application.Run();
                 ctl.Shutdown();
+                keys.Dispose();
             }
         }
     }

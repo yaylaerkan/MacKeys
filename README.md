@@ -98,6 +98,11 @@ On a Magic Keyboard, ⌘ is the Win key, and Windows handles **Win+L (lock scree
 
 If you turn on **⌘L goes to apps** in the tray menu, MacKeys turns off Win+L *only while Mac keys are active* and turns it back on when they switch off or MacKeys exits. ⌃⌘Q still locks the screen. Windows asks for administrator permission once the first time you enable it, because this is a system policy (`DisableLockWorkstation`).
 
+Even with the lock off, Windows still swallows the <kbd>L</kbd> while the physical ⌘ (Win) key is down. So in browsers (Chrome, Edge, Firefox, Brave, Opera, Vivaldi, Arc), MacKeys turns ⌘L into <kbd>F6</kbd>, which focuses the address bar the same way.
+
+### 🛟 Stuck-key watchdog
+Remappers sometimes lose a key-up, and then Windows thinks Ctrl or Win is still held. When that happens, every key turns into a shortcut. MacKeys reads what the keyboards *physically* send (Raw Input). If Windows reports a modifier as down while nothing is held, MacKeys releases it within about 0.3 s. It also never switches the PowerToys config while a key is held. Short Bluetooth sleep disconnects (under 45 s) don't switch Mac keys off. Events are logged to `%LOCALAPPDATA%\MacKeys\mackeys.log`.
+
 ## 🚀 Install
 
 > **Requirements:** Windows 10/11 and [PowerToys](https://learn.microsoft.com/windows/powertoys/install), which you can install with `winget install Microsoft.PowerToys`.
@@ -178,7 +183,8 @@ MacKeys şunları yapar:
   - <kbd>F1</kbd>/<kbd>F2</kbd> mouse hangi ekrandaysa onun parlaklığını değiştirir (harici monitör dahil) ve Windows 11'in ses göstergesine benzeyen bir gösterge çıkar.
   - <kbd>F7</kbd>–<kbd>F9</kbd> müzik kontrolü, <kbd>F10</kbd>–<kbd>F12</kbd> ses.
 - **Sadece Magic Keyboard bağlıyken çalışır.** Klavye bağlanınca tüm Mac kısayolları kendiliğinden açılır, bağlantı kopunca kapanır. Laptopun kendi klavyesi o zaman normal Windows klavyesi gibi davranır. İsterseniz tepsideki ☀️ simgesinden "Always on" veya "Off" seçerek elle de yönetebilirsiniz.
-- **⌘L:** Windows, Win+L kısayolunu (ekran kilidi) her şeyden önce yakalar. Bu yüzden normalde ⌘L ekranı kilitler. Tepsi menüsünde "⌘L goes to apps" seçeneğini açarsanız, Mac modu açıkken Win+L kapatılır ve ⌘L Chrome'da adres çubuğuna gider. Ekranı kilitlemek için ⌃⌘Q kullanırsınız. Bu seçeneği ilk açışta Windows bir kez yönetici izni ister.
+- **⌘L:** Windows, Win+L kısayolunu (ekran kilidi) her şeyden önce yakalar. Bu yüzden normalde ⌘L ekranı kilitler. Tepsi menüsünde "⌘L goes to apps" seçeneğini açarsanız, Mac modu açıkken Win+L kapatılır. ⌘L de tarayıcılarda F6'ya çevrilir ve adres çubuğuna gider. Ekranı kilitlemek için ⌃⌘Q kullanırsınız. Bu seçeneği ilk açışta Windows bir kez yönetici izni ister.
+- **Takılı tuş koruması:** Windows bir değiştirici tuşu (Ctrl/Win/Alt/Shift) basılı sanıyor ama klavyede fiziksel olarak hiçbir tuş basılı değilse, MacKeys bunu yaklaşık 0,3 saniyede fark edip bırakır.
 
 **Kurulum:** Önce [PowerToys](https://learn.microsoft.com/windows/powertoys/install)'u kurun (`winget install Microsoft.PowerToys`), sonra:
 
