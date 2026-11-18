@@ -269,7 +269,6 @@ namespace MacKeys
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == 0x00FF /*WM_INPUT*/ && Keys != null) { Keys.OnRawInput(m.LParam); base.WndProc(ref m); return; }
             if (m.Msg == 0x0312 /*WM_HOTKEY*/) { OnKey(m.WParam.ToInt32() == 1 ? -STEP : STEP); return; }
             if (m.Msg == 0x0219 /*WM_DEVICECHANGE*/ && DevicesChanged != null) DevicesChanged(this, EventArgs.Empty);
             base.WndProc(ref m);
@@ -612,71 +611,105 @@ namespace MacKeys
         }
     }
 
-    // ---------------- Physical keyboard state, stuck-key watchdog, ⌘L ----------------
-    // Raw Input reports what the keyboards physically send, before PowerToys or any hook changes it.
-    // That lets MacKeys tell a genuinely held modifier from one Windows merely *thinks* is down
-    // (its key-up got lost while a remap changed), and release the latter.
+    // ---------------- Physical keyboard state, stuck-key watchdog ----------------
+    // A low-level keyboard hook that sits FIRST in the hook chain (before PowerToys) sees every physical key,
+    // including ⌘/⌃, which PowerToys swallows and replaces. (Raw Input does not report keys a hook swallowed,
+    // so an earlier version could not see ⌘ and released modifiers the user was holding.)
+    // Windows calls the most recently installed hook first, so MacKeys re-installs its hook whenever the
+    // PowerToys Keyboard Manager engine (re)starts. If it ever sees a modifier pressed with no physical key
+    // behind it, it assumes it is missing input and stays hands-off for a while.
     class KeyWatch
     {
         const long OurTag = 1; // dwExtraInfo PowerToys Keyboard Manager treats as "already processed" and ignores
         static readonly byte[] Modifiers = { 0x5B, 0x5C, 0xA2, 0xA3, 0xA4, 0xA5, 0xA0, 0xA1 };
         static readonly string[] ModNames = { "LWin", "RWin", "LCtrl", "RCtrl", "LAlt", "RAlt", "LShift", "RShift" };
-        const double StuckMs = 700; // how long Windows must report a modifier down with nothing physically held
+        const double StuckMs = 1000; // how long Windows must report a modifier down with nothing physically held
 
-        readonly HashSet<int> held = new HashSet<int>();     // physically held modifier keys (raw ids)
-        readonly HashSet<int> seen = new HashSet<int>();     // for the log: which raw modifier ids this PC sends
+        readonly HashSet<uint> held = new HashSet<uint>();   // physically held modifiers (vk)
+        readonly HashSet<uint> seen = new HashSet<uint>();   // for the log
         readonly System.Windows.Forms.Timer watchdog = new System.Windows.Forms.Timer();
+        readonly System.Windows.Forms.Timer ptWatch = new System.Windows.Forms.Timer();
+        readonly System.Windows.Forms.Timer rehook = new System.Windows.Forms.Timer();
         readonly Stopwatch clock = Stopwatch.StartNew();
         readonly double[] downSince = new double[Modifiers.Length];
-        bool rawWorks;
-        double lastRaw = -1e9, lastModUp = -1e9;
+        readonly Native.HookProc proc;                         // keep the delegate alive
+        IntPtr hook;
+        int ptPid = -1;
+        double lastPhys = -1e9, lastModUp = -1e9, distrustUntil;
 
         public KeyWatch(Osd osd)
         {
             osd.Keys = this;
-            var dev = new[] { new Native.RAWINPUTDEVICE { usUsagePage = 1, usUsage = 6, dwFlags = 0x100 /*INPUTSINK*/, hwndTarget = osd.Handle } };
-            if (!Native.RegisterRawInputDevices(dev, 1, (uint)Marshal.SizeOf(typeof(Native.RAWINPUTDEVICE))))
-                Log.Write("Raw input registration failed; stuck-key watchdog disabled.");
+            proc = Callback;
+            Install("start");
             watchdog.Interval = 150; watchdog.Tick += (o, e) => Check(); watchdog.Start();
+            rehook.Interval = 1500; rehook.Tick += (o, e) => { rehook.Stop(); Install("PowerToys (re)started"); };
+            ptWatch.Interval = 2000; ptWatch.Tick += (o, e) => WatchPowerToys(); ptWatch.Start();
+            ptPid = PowerToysPid();
             SystemEvents.SessionSwitch += (o, e) => held.Clear(); // key-ups are not seen on the lock screen
         }
 
         double Now { get { return clock.Elapsed.TotalMilliseconds; } }
 
         /// <summary>True while any modifier is physically held or a key was touched in the last <paramref name="quietMs"/>.</summary>
-        public bool Busy(double quietMs) { return held.Count > 0 || Now - lastRaw < quietMs; }
+        public bool Busy(double quietMs) { return held.Count > 0 || Now - lastPhys < quietMs; }
 
-        public void OnRawInput(IntPtr hRaw)
+        void Install(string why)
         {
-            int hdr = Marshal.SizeOf(typeof(Native.RAWINPUTHEADER));
-            uint size = 0;
-            Native.GetRawInputData(hRaw, 0x10000003 /*RID_INPUT*/, IntPtr.Zero, ref size, (uint)hdr);
-            if (size == 0) return;
-            IntPtr buf = Marshal.AllocHGlobal((int)size);
-            try
+            if (hook != IntPtr.Zero) Native.UnhookWindowsHookEx(hook);
+            hook = Native.SetWindowsHookEx(13 /*WH_KEYBOARD_LL*/, proc, Native.GetModuleHandle(null), 0);
+            distrustUntil = Now + 1000;
+            Log.Write("Keyboard hook installed (" + why + ")" + (hook == IntPtr.Zero ? " FAILED" : ""));
+        }
+
+        static int PowerToysPid()
+        {
+            var ps = Process.GetProcessesByName("PowerToys.KeyboardManagerEngine");
+            int pid = ps.Length > 0 ? ps[0].Id : -1;
+            foreach (var p in ps) p.Dispose();
+            return pid;
+        }
+
+        void WatchPowerToys()
+        {
+            int pid = PowerToysPid();
+            if (pid != ptPid) { ptPid = pid; if (pid != -1) { rehook.Stop(); rehook.Start(); } }
+        }
+
+        static bool IsModifier(uint vk) { return vk == 0x5B || vk == 0x5C || (vk >= 0xA0 && vk <= 0xA5) || (vk >= 0x10 && vk <= 0x12); }
+
+        IntPtr Callback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0)
             {
-                if (Native.GetRawInputData(hRaw, 0x10000003, buf, ref size, (uint)hdr) != size) return;
-                var h = (Native.RAWINPUTHEADER)Marshal.PtrToStructure(buf, typeof(Native.RAWINPUTHEADER));
-                if (h.dwType != 1 /*RIM_TYPEKEYBOARD*/ || h.hDevice == IntPtr.Zero) return; // ignore injected input
-                var k = (Native.RAWKEYBOARD)Marshal.PtrToStructure(new IntPtr(buf.ToInt64() + hdr), typeof(Native.RAWKEYBOARD));
-                rawWorks = true;
-                lastRaw = Now;
-                int vk = k.VKey;
-                bool isMod = vk == 0x10 || vk == 0x11 || vk == 0x12 || vk == 0x5B || vk == 0x5C || (vk >= 0xA0 && vk <= 0xA5);
-                if (!isMod) return;
-                int id = (vk << 16) | (k.MakeCode << 1) | ((k.Flags & 2) != 0 ? 1 : 0);
-                if (seen.Add(id)) Log.Write(string.Format("Raw modifier seen: vk=0x{0:X2} make=0x{1:X2}{2}", vk, k.MakeCode, (k.Flags & 2) != 0 ? " E0" : ""));
-                if ((k.Flags & 1) != 0) { held.Remove(id); lastModUp = Now; }   // RI_KEY_BREAK
-                else held.Add(id);
+                var k = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.KBDLLHOOKSTRUCT));
+                bool injected = (k.flags & 0x10) != 0, up = (k.flags & 0x80) != 0;
+                if (!injected)
+                {
+                    lastPhys = Now;
+                    if (IsModifier(k.vkCode))
+                    {
+                        if (seen.Add(k.vkCode)) Log.Write(string.Format("Physical modifier seen: vk=0x{0:X2}", k.vkCode));
+                        if (up) { held.Remove(k.vkCode); lastModUp = Now; } else held.Add(k.vkCode);
+                    }
+                }
+                else if (!up && IsModifier(k.vkCode) && k.dwExtraInfo.ToInt64() != OurTag && held.Count == 0 && Now - lastPhys > 100)
+                {
+                    // Something pressed a modifier with no physical key behind it: either another app is sending
+                    // shortcuts, or a hook installed after ours is swallowing keys. Stay out of the way.
+                    if (Now > distrustUntil) Log.Write(string.Format("Injected modifier vk=0x{0:X2} without a physical key; watchdog paused, re-hooking", k.vkCode));
+                    distrustUntil = Now + 10000;
+                    rehook.Stop(); rehook.Start();
+                }
             }
-            finally { Marshal.FreeHGlobal(buf); }
+            return Native.CallNextHookEx(hook, nCode, wParam, lParam);
         }
 
         void Check()
         {
             double now = Now;
-            if (held.Count > 0 && now - lastRaw > 10000) { Log.Write("No keyboard activity for 10 s while a modifier looked held; resetting."); held.Clear(); }
-            bool quiet = rawWorks && held.Count == 0 && now - lastModUp > 300 && now - lastRaw > 300;
+            if (held.Count > 0 && now - lastPhys > 10000) { Log.Write("No keyboard activity for 10 s while a modifier looked held; resetting."); held.Clear(); }
+            bool quiet = hook != IntPtr.Zero && now > distrustUntil && held.Count == 0 && now - lastModUp > 300 && now - lastPhys > 300;
             for (int i = 0; i < Modifiers.Length; i++)
             {
                 bool down = (Native.GetAsyncKeyState(Modifiers[i]) & 0x8000) != 0;
@@ -710,13 +743,13 @@ namespace MacKeys
             return name;
         }
 
-        public void Dispose() { watchdog.Stop(); }
+        public void Dispose() { watchdog.Stop(); ptWatch.Stop(); if (hook != IntPtr.Zero) Native.UnhookWindowsHookEx(hook); }
     }
 
     // ---------------- Mac mode controller ----------------
     class Controller
     {
-        const int OffDelayMs = 45000; // Bluetooth keyboards drop the link when they sleep; don't flip for that
+        const int OffDelayMs = 3000; // ignore momentary Bluetooth blips
 
         readonly Osd osd;
         readonly KeyWatch keys;
@@ -735,7 +768,7 @@ namespace MacKeys
             debounce.Interval = 1500; debounce.Tick += (o, e) => { debounce.Stop(); Check(); };
             osd.DevicesChanged += (o, e) => { debounce.Stop(); debounce.Start(); };
             poll.Interval = 15000; poll.Tick += (o, e) => Check(); poll.Start();
-            offDelay.Interval = OffDelayMs; offDelay.Tick += (o, e) => { offDelay.Stop(); connectedForMode = false; Log.Write("Apple keyboard gone for 45 s: Mac keys off"); Apply(false); };
+            offDelay.Interval = OffDelayMs; offDelay.Tick += (o, e) => { offDelay.Stop(); connectedForMode = false; Log.Write("Apple keyboard gone: Mac keys off"); Apply(false); };
             retry.Interval = 250; retry.Tick += (o, e) => { retry.Stop(); SyncPowerToys(); };
             KeyboardConnected = connectedForMode = AppleKeyboard.IsConnected();
             Log.Write("Started. Apple keyboard " + (KeyboardConnected ? "connected" : "not connected") + ", mode " + Settings.Mode);
@@ -786,6 +819,54 @@ namespace MacKeys
         }
 
         public void Shutdown() { }
+    }
+
+    // ---------------- Logo ----------------
+    // Same design as assets/MacKeys.ico (tools/make-icon.ps1): rounded square with the banner gradient and a
+    // white ⌘. Paused = the same shape in grey.
+    static class Logo
+    {
+        public static Bitmap Draw(int s, bool active)
+        {
+            var bmp = new Bitmap(s, s, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.Clear(Color.Transparent);
+                float m = (float)Math.Max(0, Math.Round(s * 0.04)), w = s - 2 * m, d = w * 0.48f;
+                using (var path = new GraphicsPath())
+                {
+                    path.AddArc(m, m, d, d, 180, 90); path.AddArc(m + w - d, m, d, d, 270, 90);
+                    path.AddArc(m + w - d, m + w - d, d, d, 0, 90); path.AddArc(m, m + w - d, d, d, 90, 90);
+                    path.CloseFigure();
+                    using (var brush = new LinearGradientBrush(new PointF(0, 0), new PointF(s, s), Color.White, Color.White))
+                    {
+                        var blend = new ColorBlend(3);
+                        blend.Colors = active
+                            ? new[] { Color.FromArgb(56, 189, 248), Color.FromArgb(99, 102, 241), Color.FromArgb(217, 70, 239) }
+                            : new[] { Color.FromArgb(150, 150, 150), Color.FromArgb(120, 120, 120), Color.FromArgb(95, 95, 95) };
+                        blend.Positions = new[] { 0f, 0.5f, 1f };
+                        brush.InterpolationColors = blend;
+                        g.FillPath(brush, path);
+                    }
+                }
+                using (var ff = new FontFamily("Segoe UI Symbol"))
+                using (var gp = new GraphicsPath())
+                {
+                    gp.AddString("⌘", ff, (int)FontStyle.Regular, s * 0.62f, new PointF(0, 0), StringFormat.GenericTypographic);
+                    var b = gp.GetBounds();
+                    float k = s * 0.56f / Math.Max(b.Width, b.Height);
+                    using (var mx = new Matrix())
+                    {
+                        mx.Translate((s - b.Width * k) / 2, (s - b.Height * k) / 2);
+                        mx.Scale(k, k); mx.Translate(-b.X, -b.Y);
+                        gp.Transform(mx);
+                    }
+                    g.FillPath(Brushes.White, gp);
+                }
+            }
+            return bmp;
+        }
     }
 
     // ---------------- Tray icon ----------------
@@ -862,22 +943,9 @@ namespace MacKeys
         void UpdateIcon()
         {
             icon.Text = ctl.Active ? "MacKeys — active" : "MacKeys — paused";
-            bool lightTaskbar;
-            try { var v = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "SystemUsesLightTheme", 0); lightTaskbar = v != null && (int)v != 0; }
-            catch { lightTaskbar = false; }
             int size = SystemInformation.SmallIconSize.Width;
-            int alpha = ctl.Active ? 255 : 110;
-            using (var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb))
+            using (var bmp = Logo.Draw(size, ctl.Active))
             {
-                using (var g = Graphics.FromImage(bmp))
-                using (var f = new Font(Theme.IconFont, size * 0.85f, GraphicsUnit.Pixel))
-                using (var b = new SolidBrush(lightTaskbar ? Color.FromArgb(alpha, 0, 0, 0) : Color.FromArgb(alpha, 255, 255, 255)))
-                {
-                    g.Clear(Color.Transparent);
-                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-                    var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                    g.DrawString("", f, b, new RectangleF(0, 0, size, size), sf);
-                }
                 IntPtr h = bmp.GetHicon();
                 var next = (Icon)Icon.FromHandle(h).Clone();
                 Native.DestroyIcon(h);

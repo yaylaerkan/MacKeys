@@ -84,7 +84,7 @@ MacKeys makes **Command work like Command**, brings back the Mac shortcuts you h
 ### 🔌 Only when you're using the Magic Keyboard
 By default, MacKeys switches everything **on when an Apple keyboard is connected** (Bluetooth or USB) and **off when it isn't**. When it's off, your laptop's own keyboard behaves like a normal Windows keyboard. You get a small notification each time it switches.
 
-Right-click the ☀️ icon in the tray to change this:
+Right-click the ⌘ icon in the tray to change this. The icon is in color while Mac keys are on and grey while they're paused:
 
 | Tray option | |
 |---|---|
@@ -95,7 +95,7 @@ Right-click the ☀️ icon in the tray to change this:
 MacKeys also has a **Start menu shortcut**, so you can open it again after choosing Exit.
 
 ### 🛟 Stuck-key watchdog
-Remappers sometimes lose a key-up, and then Windows thinks Ctrl or Win is still held. When that happens, every key turns into a shortcut. MacKeys reads what the keyboards *physically* send (Raw Input). If Windows reports a modifier as down while nothing is held, MacKeys releases it within about 0.7 s. It also never switches the PowerToys config while a key is held. Short Bluetooth sleep disconnects (under 45 s) don't switch Mac keys off. Events are logged to `%LOCALAPPDATA%\MacKeys\mackeys.log`.
+Remappers sometimes lose a key-up, and then Windows thinks Ctrl or Win is still held. When that happens, every key turns into a shortcut. MacKeys keeps a keyboard hook *in front of* PowerToys, re-taking that spot whenever PowerToys restarts, so it sees what you physically press, including ⌘ and ⌃. If Windows reports a modifier as down while nothing is physically held, MacKeys releases it after about 1 s. If MacKeys ever sees a modifier pressed with no physical key behind it, for example another app sending shortcuts, it stays out of the way. It also never switches the PowerToys config while a key is held, and it ignores Bluetooth blips shorter than 3 s. Events are logged to `%LOCALAPPDATA%\MacKeys\mackeys.log`.
 
 ### 🔒 Why not ⌘L?
 On a Magic Keyboard, ⌘ is the Win key. Windows handles **Win+L (lock screen) below every app and remapper**, and it keeps swallowing the <kbd>L</kbd> while the physical Win key is down even when locking is disabled. Every workaround we tried left modifier keys stuck. So **⌘L locks the screen**, just like ⌃⌘Q. In browsers, use <kbd>⌥ D</kbd> (Alt+D) or <kbd>F6</kbd> to jump to the address bar.
@@ -179,9 +179,9 @@ MacKeys şunları yapar:
 - Üst sıradaki tuşlar çalışır:
   - <kbd>F1</kbd>/<kbd>F2</kbd> mouse hangi ekrandaysa onun parlaklığını değiştirir (harici monitör dahil) ve Windows 11'in ses göstergesine benzeyen bir gösterge çıkar.
   - <kbd>F7</kbd>–<kbd>F9</kbd> müzik kontrolü, <kbd>F10</kbd>–<kbd>F12</kbd> ses.
-- **Sadece Magic Keyboard bağlıyken çalışır.** Klavye bağlanınca tüm Mac kısayolları kendiliğinden açılır, bağlantı kopunca kapanır. Laptopun kendi klavyesi o zaman normal Windows klavyesi gibi davranır. İsterseniz tepsideki ☀️ simgesinden "Always on" veya "Off" seçerek elle de yönetebilirsiniz.
+- **Sadece Magic Keyboard bağlıyken çalışır.** Klavye bağlanınca tüm Mac kısayolları kendiliğinden açılır, bağlantı kopunca kapanır. Laptopun kendi klavyesi o zaman normal Windows klavyesi gibi davranır. İsterseniz tepsideki ⌘ simgesinden "Always on" veya "Off" seçerek elle de yönetebilirsiniz. Simge Mac modu açıkken renkli, kapalıyken gri görünür.
 - **⌘L:** Windows, Win+L kısayolunu (ekran kilidi) bütün programlardan önce yakalar ve buna izin vermez. Bu yüzden ⌘L ekranı kilitler. Tarayıcıda adres çubuğuna gitmek için <kbd>⌥D</kbd> (Option+D) veya <kbd>F6</kbd> kullanın.
-- **Takılı tuş koruması:** Windows bir değiştirici tuşu (Ctrl/Win/Alt/Shift) basılı sanıyor ama klavyede fiziksel olarak hiçbir tuş basılı değilse, MacKeys bunu yaklaşık 0,7 saniyede fark edip bırakır.
+- **Takılı tuş koruması:** Windows bir değiştirici tuşu (Ctrl/Win/Alt/Shift) basılı sanıyor ama klavyede fiziksel olarak hiçbir tuş basılı değilse, MacKeys bunu yaklaşık 1 saniyede fark edip bırakır.
 - **Başlat menüsü kısayolu:** MacKeys'i kapattıktan sonra Başlat menüsünde "MacKeys" yazarak tekrar açabilirsiniz.
 
 **Kurulum:** Önce [PowerToys](https://learn.microsoft.com/windows/powertoys/install)'u kurun (`winget install Microsoft.PowerToys`), sonra:
@@ -198,7 +198,7 @@ Kurulum PowerToys'taki mevcut Keyboard Manager ayarlarınızın yedeğini alır 
 powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -RestorePowerToys
 ```
 
-Görev çubuğundaki güneş simgesine sağ tıklayarak uygulamanın Windows ile başlamasını açıp kapatabilir ya da uygulamadan çıkabilirsiniz.
+Görev çubuğundaki ⌘ simgesine sağ tıklayarak uygulamanın Windows ile başlamasını açıp kapatabilir ya da uygulamadan çıkabilirsiniz.
 
 <div align="center">
 <br>
