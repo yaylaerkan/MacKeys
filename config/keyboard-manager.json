@@ -1,0 +1,51 @@
+{
+  "remapKeys": {
+    "inProcess": [
+      { "originalKeys": "91",  "newRemapKeys": "162" },
+      { "originalKeys": "162", "newRemapKeys": "91" },
+      { "originalKeys": "92",  "newRemapKeys": "163" },
+      { "originalKeys": "118", "newRemapKeys": "177" },
+      { "originalKeys": "119", "newRemapKeys": "179" },
+      { "originalKeys": "120", "newRemapKeys": "176" },
+      { "originalKeys": "121", "newRemapKeys": "173" },
+      { "originalKeys": "122", "newRemapKeys": "174" },
+      { "originalKeys": "123", "newRemapKeys": "175" }
+    ]
+  },
+  "remapKeysToText": { "inProcess": [] },
+  "remapShortcuts": {
+    "global": [
+      { "originalKeys": "17;32",    "exactMatch": false, "newRemapKeys": "91;83",    "operationType": 0 },
+      { "originalKeys": "17;81",    "exactMatch": false, "newRemapKeys": "18;115",   "operationType": 0 },
+      { "originalKeys": "17;9",     "exactMatch": false, "newRemapKeys": "18;9",     "operationType": 0 },
+      { "originalKeys": "91;9",     "exactMatch": false, "newRemapKeys": "17;9",     "operationType": 0 },
+      { "originalKeys": "17;37",    "exactMatch": false, "newRemapKeys": "36",       "operationType": 0 },
+      { "originalKeys": "17;39",    "exactMatch": false, "newRemapKeys": "35",       "operationType": 0 },
+      { "originalKeys": "17;38",    "exactMatch": false, "newRemapKeys": "17;36",    "operationType": 0 },
+      { "originalKeys": "17;40",    "exactMatch": false, "newRemapKeys": "17;35",    "operationType": 0 },
+      { "originalKeys": "17;16;37", "exactMatch": false, "newRemapKeys": "16;36",    "operationType": 0 },
+      { "originalKeys": "17;16;39", "exactMatch": false, "newRemapKeys": "16;35",    "operationType": 0 },
+      { "originalKeys": "17;16;38", "exactMatch": false, "newRemapKeys": "17;16;36", "operationType": 0 },
+      { "originalKeys": "17;16;40", "exactMatch": false, "newRemapKeys": "17;16;35", "operationType": 0 },
+      { "originalKeys": "18;37",    "exactMatch": false, "newRemapKeys": "17;37",    "operationType": 0 },
+      { "originalKeys": "18;39",    "exactMatch": false, "newRemapKeys": "17;39",    "operationType": 0 },
+      { "originalKeys": "18;16;37", "exactMatch": false, "newRemapKeys": "17;16;37", "operationType": 0 },
+      { "originalKeys": "18;16;39", "exactMatch": false, "newRemapKeys": "17;16;39", "operationType": 0 },
+      { "originalKeys": "18;8",     "exactMatch": false, "newRemapKeys": "17;8",     "operationType": 0 },
+      { "originalKeys": "17;219",   "exactMatch": false, "newRemapKeys": "18;37",    "operationType": 0 },
+      { "originalKeys": "17;221",   "exactMatch": false, "newRemapKeys": "18;39",    "operationType": 0 },
+      { "originalKeys": "17;16;51", "exactMatch": false, "newRemapKeys": "91;44",    "operationType": 0 },
+      { "originalKeys": "17;16;52", "exactMatch": false, "newRemapKeys": "91;16;83", "operationType": 0 },
+      { "originalKeys": "17;16;53", "exactMatch": false, "newRemapKeys": "91;16;82", "operationType": 0 },
+      {
+        "originalKeys": "91;17;81", "exactMatch": false, "newRemapKeys": "", "operationType": 1,
+        "runProgramFilePath": "%MACKEYS_EXE%",
+        "runProgramArgs": "--lock",
+        "runProgramStartInDir": "", "runProgramElevationLevel": 0,
+        "runProgramAlreadyRunningAction": 1, "runProgramStartWindowType": 1
+      }
+    ],
+    "appSpecific": []
+  },
+  "remapShortcutsToText": { "global": [], "appSpecific": [] }
+}
