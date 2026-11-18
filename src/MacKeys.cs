@@ -492,7 +492,6 @@ namespace MacKeys
             get { var s = Read("Mode", "Auto"); return s == "On" ? Mode.On : s == "Off" ? Mode.Off : Mode.Auto; }
             set { Write("Mode", value.ToString()); }
         }
-        public static bool AllowCmdL { get { return Read("AllowCmdL", "0") == "1"; } set { Write("AllowCmdL", value ? "1" : "0"); } }
 
         static string Read(string name, string def)
         {
@@ -569,103 +568,25 @@ namespace MacKeys
         }
     }
 
-    // ---------------- ⌘L support ----------------
-    // Windows handles Win+L (⌘ is the Win key on a Magic Keyboard) before any remapper sees it, so ⌘L would lock
-    // the screen. The only switch is the DisableLockWorkstation policy; MacKeys turns it on only while Mac mode is
-    // active and the user opted in, and turns it off again otherwise. ⌃⌘Q still locks via "MacKeys.exe --lock".
+    // ---------------- Lock ----------------
+    // ⌃⌘Q runs "MacKeys.exe --lock". (An earlier version could disable Win+L so ⌘L reached apps; Windows still
+    // swallows L while the physical Win key is down, and every workaround left modifiers stuck, so it was removed.
+    // CleanUpOldCmdL undoes what that version may have left behind.)
     static class LockPolicy
     {
-        const string Key = @"Software\Microsoft\Windows\CurrentVersion\Policies\System";
-        const string Name = "DisableLockWorkstation";
+        public static void LockNow() { Native.LockWorkStation(); }
 
-        const System.Security.AccessControl.RegistryRights Needed =
-            System.Security.AccessControl.RegistryRights.ReadKey | System.Security.AccessControl.RegistryRights.SetValue;
-
-        // Open with exactly the rights MacKeys is granted (OpenSubKey(name, true) would ask for full KEY_WRITE and fail).
-        static RegistryKey OpenForWrite()
-        {
-            return Registry.CurrentUser.OpenSubKey(Key, RegistryKeyPermissionCheck.ReadWriteSubTree, Needed);
-        }
-
-        public static bool CanWrite()
-        {
-            try { using (var k = OpenForWrite()) return k != null; } catch { return false; }
-        }
-
-        // One-time, elevated: create the key and let the current user change values in it.
-        // Returns null on success, otherwise a message for the user.
-        public static string GrantAccess()
-        {
-            int exit;
-            try
-            {
-                var psi = new ProcessStartInfo(Application.ExecutablePath, "--grant " + System.Security.Principal.WindowsIdentity.GetCurrent().User.Value)
-                { Verb = "runas", UseShellExecute = true };
-                using (var p = Process.Start(psi)) { p.WaitForExit(); exit = p.ExitCode; }
-            }
-            catch (System.ComponentModel.Win32Exception ex)
-            {
-                if (ex.NativeErrorCode == 1223) return "Administrator permission was not given, so nothing was changed.";
-                return "Windows could not show the administrator prompt (error " + ex.NativeErrorCode + ": " + ex.Message + ").";
-            }
-            catch (Exception ex) { return "Could not ask for administrator permission: " + ex.Message; }
-            if (exit != 0) return "The administrator step failed (code " + exit + "). Details: " + GrantLog;
-            return CanWrite() ? null : "The setting is still not writable after the administrator step.";
-        }
-
-        static string GrantLog { get { return Path.Combine(Path.GetTempPath(), "MacKeys-grant.log"); } }
-
-        // Runs in the elevated "--grant <sid>" instance. Exit code 0 = success.
-        public static int DoGrant(string sid)
+        public static void CleanUpOldCmdL()
         {
             try
             {
-                using (var users = Registry.Users.OpenSubKey(sid, true))
-                {
-                    if (users == null) throw new InvalidOperationException("User hive " + sid + " is not loaded.");
-                    using (var k = users.CreateSubKey(Key))
-                    {
-                        var sec = k.GetAccessControl();
-                        sec.AddAccessRule(new System.Security.AccessControl.RegistryAccessRule(
-                            new System.Security.Principal.SecurityIdentifier(sid), Needed,
-                            System.Security.AccessControl.AccessControlType.Allow));
-                        k.SetAccessControl(sec);
-                    }
-                }
-                return 0;
-            }
-            catch (Exception ex)
-            {
-                try { File.WriteAllText(GrantLog, DateTime.Now + "  " + ex); } catch { }
-                return 1;
-            }
-        }
-
-        public static bool IsDisabled()
-        {
-            try { using (var k = Registry.CurrentUser.OpenSubKey(Key)) return k != null && Convert.ToInt32(k.GetValue(Name, 0)) == 1; } catch { return false; }
-        }
-
-        public static void SetDisabled(bool disabled)
-        {
-            try
-            {
-                using (var k = OpenForWrite())
-                {
-                    if (k == null) return;
-                    if (disabled) k.SetValue(Name, 1, RegistryValueKind.DWord); else k.DeleteValue(Name, false);
-                }
+                using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Policies\System",
+                           RegistryKeyPermissionCheck.ReadWriteSubTree,
+                           System.Security.AccessControl.RegistryRights.ReadKey | System.Security.AccessControl.RegistryRights.SetValue))
+                    if (k != null) k.DeleteValue("DisableLockWorkstation", false);
             }
             catch { }
-        }
-
-        // "--lock": lock even while Win+L is disabled.
-        public static void LockNow()
-        {
-            bool wasDisabled = IsDisabled();
-            if (wasDisabled) SetDisabled(false);
-            Native.LockWorkStation();
-            if (wasDisabled) { Thread.Sleep(1500); SetDisabled(true); }
+            try { using (var k = Registry.CurrentUser.OpenSubKey(@"Software\MacKeys", true)) if (k != null) k.DeleteValue("AllowCmdL", false); } catch { }
         }
     }
 
@@ -700,33 +621,24 @@ namespace MacKeys
         const long OurTag = 1; // dwExtraInfo PowerToys Keyboard Manager treats as "already processed" and ignores
         static readonly byte[] Modifiers = { 0x5B, 0x5C, 0xA2, 0xA3, 0xA4, 0xA5, 0xA0, 0xA1 };
         static readonly string[] ModNames = { "LWin", "RWin", "LCtrl", "RCtrl", "LAlt", "RAlt", "LShift", "RShift" };
-        static readonly HashSet<string> Browsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "arc", "zen", "librewolf", "waterfox" };
+        const double StuckMs = 700; // how long Windows must report a modifier down with nothing physically held
 
-        readonly Osd osd;
         readonly HashSet<int> held = new HashSet<int>();     // physically held modifier keys (raw ids)
+        readonly HashSet<int> seen = new HashSet<int>();     // for the log: which raw modifier ids this PC sends
         readonly System.Windows.Forms.Timer watchdog = new System.Windows.Forms.Timer();
         readonly Stopwatch clock = Stopwatch.StartNew();
         readonly double[] downSince = new double[Modifiers.Length];
-        readonly Native.HookProc hookProc;                     // keep the delegate alive
-        IntPtr hook;
         bool rawWorks;
         double lastRaw = -1e9, lastModUp = -1e9;
-        volatile bool winHeld;
-
-        public static volatile bool CmdLEnabled;               // set by Controller (Mac keys active && option on)
 
         public KeyWatch(Osd osd)
         {
-            this.osd = osd;
             osd.Keys = this;
             var dev = new[] { new Native.RAWINPUTDEVICE { usUsagePage = 1, usUsage = 6, dwFlags = 0x100 /*INPUTSINK*/, hwndTarget = osd.Handle } };
             if (!Native.RegisterRawInputDevices(dev, 1, (uint)Marshal.SizeOf(typeof(Native.RAWINPUTDEVICE))))
                 Log.Write("Raw input registration failed; stuck-key watchdog disabled.");
             watchdog.Interval = 150; watchdog.Tick += (o, e) => Check(); watchdog.Start();
-            hookProc = HookCallback;
-            hook = Native.SetWindowsHookEx(13 /*WH_KEYBOARD_LL*/, hookProc, Native.GetModuleHandle(null), 0);
-            SystemEvents.SessionSwitch += (o, e) => { held.Clear(); winHeld = false; }; // key-ups are not seen on the lock screen
+            SystemEvents.SessionSwitch += (o, e) => held.Clear(); // key-ups are not seen on the lock screen
         }
 
         double Now { get { return clock.Elapsed.TotalMilliseconds; } }
@@ -753,10 +665,9 @@ namespace MacKeys
                 bool isMod = vk == 0x10 || vk == 0x11 || vk == 0x12 || vk == 0x5B || vk == 0x5C || (vk >= 0xA0 && vk <= 0xA5);
                 if (!isMod) return;
                 int id = (vk << 16) | (k.MakeCode << 1) | ((k.Flags & 2) != 0 ? 1 : 0);
+                if (seen.Add(id)) Log.Write(string.Format("Raw modifier seen: vk=0x{0:X2} make=0x{1:X2}{2}", vk, k.MakeCode, (k.Flags & 2) != 0 ? " E0" : ""));
                 if ((k.Flags & 1) != 0) { held.Remove(id); lastModUp = Now; }   // RI_KEY_BREAK
                 else held.Add(id);
-                bool w = false; foreach (var x in held) if ((x >> 16) == 0x5B || (x >> 16) == 0x5C) w = true;
-                winHeld = w;
             }
             finally { Marshal.FreeHGlobal(buf); }
         }
@@ -764,48 +675,20 @@ namespace MacKeys
         void Check()
         {
             double now = Now;
-            if (held.Count > 0 && now - lastRaw > 10000) { Log.Write("No keyboard activity for 10 s while a modifier looked held; resetting."); held.Clear(); winHeld = false; }
+            if (held.Count > 0 && now - lastRaw > 10000) { Log.Write("No keyboard activity for 10 s while a modifier looked held; resetting."); held.Clear(); }
             bool quiet = rawWorks && held.Count == 0 && now - lastModUp > 300 && now - lastRaw > 300;
             for (int i = 0; i < Modifiers.Length; i++)
             {
                 bool down = (Native.GetAsyncKeyState(Modifiers[i]) & 0x8000) != 0;
                 if (!down || !quiet) { downSince[i] = 0; continue; }
                 if (downSince[i] == 0) { downSince[i] = now; continue; }
-                if (now - downSince[i] < 300) continue;
+                if (now - downSince[i] < StuckMs) continue;
                 // Windows thinks it is down, nothing is physically held: release it.
                 if (Modifiers[i] == 0x5B || Modifiers[i] == 0x5C) { Send(0xE8, false); Send(0xE8, true); } // keep Start from opening
                 Send(Modifiers[i], true);
                 downSince[i] = 0;
                 Log.Write("Released stuck " + ModNames[i] + " (foreground: " + ForegroundName() + ")");
             }
-        }
-
-        // ⌘L: Windows swallows L while the physical Win (⌘) key is down, even with the lock disabled.
-        // In a browser, send F6 instead, which also focuses the address bar.
-        IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
-        {
-            if (nCode >= 0 && CmdLEnabled && winHeld)
-            {
-                int msg = wParam.ToInt32();
-                if (msg == 0x100 || msg == 0x104)
-                {
-                    var k = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.KBDLLHOOKSTRUCT));
-                    if (k.vkCode == 0x4C && (k.flags & 0x10) == 0 && Browsers.Contains(ForegroundName()))
-                    {
-                        osd.BeginInvoke((Action)FocusAddressBar);
-                        return new IntPtr(1);
-                    }
-                }
-            }
-            return Native.CallNextHookEx(hook, nCode, wParam, lParam);
-        }
-
-        void FocusAddressBar()
-        {
-            bool ctrl = (Native.GetAsyncKeyState(0xA2) & 0x8000) != 0;
-            if (ctrl) Send(0xA2, true);          // ⌘ is Ctrl right now; F6 must arrive without it
-            Send(0x75, false); Send(0x75, true); // F6
-            if (ctrl && winHeld) Send(0xA2, false);
         }
 
         static void Send(ushort vk, bool up)
@@ -827,7 +710,7 @@ namespace MacKeys
             return name;
         }
 
-        public void Dispose() { if (hook != IntPtr.Zero) Native.UnhookWindowsHookEx(hook); }
+        public void Dispose() { watchdog.Stop(); }
     }
 
     // ---------------- Mac mode controller ----------------
@@ -887,8 +770,6 @@ namespace MacKeys
             Active = active;
             if (force) ptKnown = false;
             osd.HotkeysEnabled = active;
-            LockPolicy.SetDisabled(active && Settings.AllowCmdL);
-            KeyWatch.CmdLEnabled = active && Settings.AllowCmdL;
             SyncPowerToys();
             if (Changed != null) Changed(this, EventArgs.Empty);
         }
@@ -904,10 +785,7 @@ namespace MacKeys
             Log.Write("PowerToys remaps " + (Active ? "on" : "off"));
         }
 
-        public void Shutdown()
-        {
-            LockPolicy.SetDisabled(false); // never leave Win+L disabled behind
-        }
+        public void Shutdown() { }
     }
 
     // ---------------- Tray icon ----------------
@@ -918,7 +796,7 @@ namespace MacKeys
 
         readonly NotifyIcon icon = new NotifyIcon();
         readonly Controller ctl;
-        readonly ToolStripMenuItem status, auto, on, off, cmdL, autostart;
+        readonly ToolStripMenuItem status, auto, on, off, autostart;
         Icon current;
         bool lastActive;
 
@@ -930,14 +808,12 @@ namespace MacKeys
             auto = new ToolStripMenuItem("Automatic (when an Apple keyboard is connected)", null, (o, e) => SetMode(Mode.Auto));
             on = new ToolStripMenuItem("Always on", null, (o, e) => SetMode(Mode.On));
             off = new ToolStripMenuItem("Off", null, (o, e) => SetMode(Mode.Off));
-            cmdL = new ToolStripMenuItem("⌘L goes to apps (turns off Win+L while active)", null, (o, e) => ToggleCmdL());
             autostart = new ToolStripMenuItem("Start with Windows", null, (o, e) => SetAutostart(!IsAutostart()));
             menu.Items.Add(new ToolStripMenuItem("MacKeys") { Enabled = false });
             menu.Items.Add(status);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(auto); menu.Items.Add(on); menu.Items.Add(off);
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(cmdL);
             menu.Items.Add(autostart);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(new ToolStripMenuItem("Exit", null, (o, e) => { icon.Visible = false; Application.Exit(); }));
@@ -963,34 +839,10 @@ namespace MacKeys
             status.Text = ctl.Active ? "● Active" + (ctl.KeyboardConnected ? " — Apple keyboard connected" : "")
                                      : "○ Paused" + (m == Mode.Auto ? " — no Apple keyboard" : "");
             auto.Checked = m == Mode.Auto; on.Checked = m == Mode.On; off.Checked = m == Mode.Off;
-            cmdL.Checked = Settings.AllowCmdL;
             autostart.Checked = IsAutostart();
         }
 
         void SetMode(Mode m) { Settings.Mode = m; ctl.Apply(false); }
-
-        void ToggleCmdL()
-        {
-            if (!Settings.AllowCmdL && !LockPolicy.CanWrite())
-            {
-                var r = MessageBox.Show(
-                    "Windows locks the screen on Win+L before any app can see it, and ⌘ is the Win key on a Magic Keyboard.\n\n" +
-                    "To let ⌘L reach apps, MacKeys turns off Win+L while Mac keys are active (⌃⌘Q still locks) and turns it back on otherwise.\n\n" +
-                    "Windows will ask for administrator permission once so MacKeys can change this setting. Continue?",
-                    "MacKeys", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
-                if (r != DialogResult.OK) return;
-                var err = LockPolicy.GrantAccess();
-                if (err != null) { MessageBox.Show(err, "MacKeys", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-            }
-            Settings.AllowCmdL = !Settings.AllowCmdL;
-            ctl.Apply(false);
-            string msg = !Settings.AllowCmdL ? "⌘L locks the screen again (Win+L is back on)."
-                       : ctl.Active ? "⌘L now goes to apps. Use ⌃⌘Q to lock the screen."
-                       : "⌘L will go to apps whenever Mac keys are active.";
-            if (Settings.AllowCmdL && ctl.Active && !LockPolicy.IsDisabled())
-                msg = "Could not turn off Win+L. Please report this on GitHub.";
-            icon.ShowBalloonTip(3000, "MacKeys", msg, ToolTipIcon.None);
-        }
 
         static bool IsAutostart()
         {
@@ -1044,7 +896,6 @@ namespace MacKeys
         static void Main(string[] args)
         {
             if (args.Length > 0 && args[0] == "--lock") { LockPolicy.LockNow(); return; }
-            if (args.Length > 1 && args[0] == "--grant") { Environment.Exit(LockPolicy.DoGrant(args[1])); return; }
 
             bool created;
             using (new Mutex(true, "MacKeys.Resident", out created))
@@ -1054,6 +905,7 @@ namespace MacKeys
                 Native.timeBeginPeriod(1);                            // smoother animation timer
                 Application.EnableVisualStyles();
                 var osd = new Osd();
+                LockPolicy.CleanUpOldCmdL();
                 var h = osd.Handle; // create the window without showing it
                 var keys = new KeyWatch(osd);
                 var ctl = new Controller(osd, keys);

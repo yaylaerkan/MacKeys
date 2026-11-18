@@ -33,6 +33,15 @@ Copy-Item (Join-Path $root 'bin\MacKeys.exe') $exe -Force
 Write-Host '==> Enabling start with Windows'
 Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'MacKeys' -Value "`"$exe`""
 
+Write-Host '==> Adding a Start menu shortcut'
+$lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'MacKeys.lnk'
+$shell = New-Object -ComObject WScript.Shell
+$sc = $shell.CreateShortcut($lnk)
+$sc.TargetPath = $exe
+$sc.WorkingDirectory = $installDir
+$sc.Description = 'Mac-style keys for Apple Magic Keyboard'
+$sc.Save()
+
 if ($SkipPowerToys) { Start-Process $exe; Write-Host 'Done (PowerToys skipped).'; return }
 
 # ---------------- PowerToys Keyboard Manager ----------------

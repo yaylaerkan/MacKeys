@@ -20,8 +20,9 @@ Start-Sleep -Milliseconds 500
 Write-Host '==> Turning Win+L back on (if MacKeys had turned it off)'
 Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'DisableLockWorkstation' -ErrorAction SilentlyContinue
 
-Write-Host '==> Removing start with Windows and settings'
+Write-Host '==> Removing start with Windows, Start menu shortcut and settings'
 Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'MacKeys' -ErrorAction SilentlyContinue
+Remove-Item (Join-Path ([Environment]::GetFolderPath('Programs')) 'MacKeys.lnk') -ErrorAction SilentlyContinue
 Remove-Item 'HKCU:\Software\MacKeys' -Recurse -ErrorAction SilentlyContinue
 
 $restore = $null
